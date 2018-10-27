@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 '''Live Data Web API for Modbus Meters
+26 Aug 2018 - Version 1.3.1
+	Implemented signal handler for SIGTERM shutdown
 26 July 2018 - Version 1.3
 	Implemented regular automatic polling for pulse meters and intial timestamping
 13 June 2018 - Version 1.2
@@ -11,6 +13,7 @@
 '''
 # Remember to change EOL convention to suit Windows or Linux depending on where this will run
 import modbus_tk.modbus_tcp as modbus_tcp
+import signal
 from socketserver import ThreadingTCPServer
 from http.server import SimpleHTTPRequestHandler
 from threading import Lock, Event, Thread
@@ -97,7 +100,6 @@ def GoModbus(id):
 		status = 'Cached'
 	return {'Name':meters[id]['Name'], 'Value':meters[id]['Value'], 'Timestamp':meters[id]['Timestamp'].isoformat(), 'ChangeTime':meters[id]['ChangeTime'].isoformat(), 'PrevValue':meters[id]['PrevValue'], 'PrevChangeTime':meters[id]['PrevChangeTime'].isoformat(), 'Units':meters[id]['Units'], 'Status':status}
 
-
 class CustomHandler(SimpleHTTPRequestHandler):	# Based on Python Standard Library
 	global meters
 	def do_GET(self):	# Handles HTTP GET Verb
@@ -141,10 +143,8 @@ class CustomHandler(SimpleHTTPRequestHandler):	# Based on Python Standard Librar
 			self.send_header('Content-Type','text/html')
 			self.end_headers()
 			self.wfile.write(b"Shutting Down...\n")
-			print("Shutting down...")
-			httpd.shutdown()
+			Killer(0,None)
 			self.wfile.write(b"Done")	# Hasn't technically shutdown yet but the serving thread should be terminating imminently
-			print("Done")
 			return
 		elif config.getboolean('DEFAULT','servefiles'):	# If serving files is allowed, then the original Python library does this.
 			SimpleHTTPRequestHandler.do_GET(self)
@@ -179,6 +179,12 @@ def RegularUpdate(meters, wait, Shutdown):
 				print(f'Auto-Update meter {meters[id]["Name"]}:{GoModbus(id)["Timestamp"]}')	# Only on meters with AutoUpdate enabled, refresh cached data every so often.
 		sleep(wait)
 
+def Killer(signum,frame):
+	print("Shutting down...")
+	httpd.shutdown()
+	Shutdown.set()
+	print("Done")
+
 if __name__ == '__main__':
 	starttime = datetime.utcnow()
 	config = SafeConfigParser({'httpport':'8080', 'httphost':'localhost', 'minpolltime':'1000', 'meterlist':'Meter List.csv', 'shutdowncmd':'shutdown', 'servefiles':'false', 'listdirs':'false'})	# Default configuration
@@ -204,13 +210,11 @@ if __name__ == '__main__':
 	httpd = ThreadingTCPServer((config.get('DEFAULT','httphost'), config.getint('DEFAULT','httpport')),CustomHandler)	# Start the HTTP Server
 	print('Server Running "{}:{}"'.format(config.get('DEFAULT','httphost'),config.get('DEFAULT','httpport')))
 	print('To shut down, visit "/command?{}"'.format(config.get('DEFAULT','shutdowncmd')))
+	signal.signal(signal.SIGTERM,Killer)
 	try:
 		httpd.serve_forever()
 	except KeyboardInterrupt:	# Allow Ctrl+C locally to close it gracefully
-		print("Shutting down...")
-		httpd.shutdown()
-		Shutdown.set()
-		print("Done")
+		Killer(0,None)	# Envoke the signal handler
 	httpd.server_close()	# Finally close everything off
 	chdir(cwd)	# Change the working directory back to what it was when it started.
 	raise SystemExit	# Ensure explicit termination at this point
