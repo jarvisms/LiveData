@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 '''Live Data Web API for Modbus Meters
 
+13 June 2018 - Version 1.2
+	Provides previous data for use with cumulative parameters
+13 May 2018 - Version 1.1
+	Refactored for Python 3, minor edits to docstrings
 30 Oct 2016 - Version 1.0
 	Initial complete version written for Python 2
-13 May 2018 - Version 1.1
-	Refactored for Python 3, minor edits to doctrings
 '''
 # Remember to change EOL convention to suit Windows or Linux depending on where this will run
 import modbus_tk.modbus_tcp as modbus_tcp
@@ -38,7 +40,10 @@ def LoadSettings():
 				'Port':int(item.get('Port',0)),			# Invalid default
 				'Scale':float(item.get('Scale',1)),
 				'Value':float(item.get('Value',0)),
+				'PrevValue':float(item.get('PrevValue',0)),
 				'Timestamp':item.get('Timestamp',datetime.min),	# Default is the dawn of time
+				'PrevChangeTime':item.get('PrevChangeTime',datetime.min),	# Default is the dawn of time
+				'ChangeTime':item.get('ChangeTime',datetime.min),	# Default is the dawn of time
 				'ThreadLock':Lock()	# Thread Lock so only one thread tries to grab new data for any one meter
 				})
 				BigEndian = item.get('BigEndian','True').lower()
@@ -62,10 +67,13 @@ def GoModbus(id):
 			master = modbus_tcp.TcpMaster(host=meters[id].get('IP','127.0.0.1'), port=meters[id].get('Port',502))	# Sets up a TCP connection to the given slave
 			result = master.execute(meters[id].get('Address',0), meters[id].get('Function',0), meters[id].get('Register',0), meters[id].get('Count',0)) # Polls for the data
 			master._do_close()	# Closes the connection again
-			meters[id].update({'Value' : meters[id]['Scale'] * unpack('>'+meters[id].get('Encoding','>'+'H'*len(result)), pack('>'+'H'*len(result), *(result if meters[id]['BigEndian'] else reversed(result))))[0]})	# Orders the raw 16 bit words depending on Endianness, and re-encodes them in the given data format
-			meters[id].update({'Timestamp':datetime.utcnow()})	# Grabs the time of this fresh data
-			status = 'Polled'
-
+			val = meters[id]['Scale'] * unpack('>'+meters[id].get('Encoding','>'+'H'*len(result)), pack('>'+'H'*len(result), *(result if meters[id]['BigEndian'] else reversed(result))))[0]	# Orders the raw 16 bit words depending on Endianness, and re-encodes them in the given data format
+			if val != meters[id]['Value']:	# Proceed only if the new value is different to the old (Cumulative count values must change)
+				meters[id].update({'PrevValue' : meters[id]['Value'], 'PrevChangeTime' : meters[id]['ChangeTime'] , 'Value' : val, 'Timestamp':datetime.utcnow(), 'ChangeTime': datetime.utcnow() })	# Stores original data as previous, and stores fresh data along with the timestamp of this fresh data, the LastChange records when the change was seen
+				status = 'Polled'
+			else:	# If the cumulative values have not moved (or by chance, instantaneous values are the same)
+				meters[id].update({'Timestamp':datetime.utcnow()})	# Just store the timestamp as the value is unchanged as is LastChange. Preserve the previous details
+				status = 'Polled but no recent change'
 		except ModbusError as e:	# Catch Modbus Specific Exceptions, likely invalid registers etc. Returns the potentially stale cached data
 			print("Modbus error ", e.get_exception_code())
 			status = 'Modbus Error {}'.format(e.get_exception_code())
@@ -80,7 +88,7 @@ def GoModbus(id):
 	else:	# If the cached data is not stale, then don't do anything and just return that instead
 		status = 'Cached'
 
-	return {'Name':meters[id]['Name'], 'Value':meters[id]['Value'], 'Timestamp':meters[id]['Timestamp'].isoformat(), 'Units':meters[id]['Units'], 'Status':status}
+	return {'Name':meters[id]['Name'], 'Value':meters[id]['Value'], 'Timestamp':meters[id]['Timestamp'].isoformat(), 'ChangeTime':meters[id]['ChangeTime'].isoformat(), 'PrevValue':meters[id]['PrevValue'], 'PrevChangeTime':meters[id]['PrevChangeTime'].isoformat(), 'Units':meters[id]['Units'], 'Status':status}
 
 
 class CustomHandler(SimpleHTTPRequestHandler):	# Based on Python Standard Library
