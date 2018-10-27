@@ -1,23 +1,30 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python3
+'''Live Data Web API for Modbus Meters
+
+30 Oct 2016 - Version 1.0
+	Initial complete version written for Python 2
+13 May 2018 - Version 1.1
+	Refactored for Python 3, minor edits to doctrings
+'''
 # Remember to change EOL convention to suit Windows or Linux depending on where this will run
 import modbus_tk.modbus_tcp as modbus_tcp
-from SocketServer import ThreadingTCPServer
-from SimpleHTTPServer import SimpleHTTPRequestHandler
+from socketserver import ThreadingTCPServer
+from http.server import SimpleHTTPRequestHandler
 from threading import Lock
 from modbus_tk.modbus import ModbusError
 from csv import DictReader
 from struct import *
 from datetime import datetime, timedelta
 from json import dumps
-from urlparse import urlsplit, parse_qs
+from urllib.parse import urlsplit, parse_qs
 from os import getcwd, chdir, getpid
 from os.path import dirname, realpath
-from ConfigParser import SafeConfigParser
+from configparser import SafeConfigParser
 
 def LoadSettings():
-	'''Opens the meter definition file defined in the config file, converts all of the data to suitable data types and stores everything in a dictionary'''
+	'''Open the meter definition file defined in the config file, convert all of the data to suitable data types and store everything in a dictionary'''
 	global meters
-	with open(config.get('DEFAULT','meterlist'), "rb") as meterfile:
+	with open(config.get('DEFAULT','meterlist'), "r", newline='') as meterfile:
 		metercsv = DictReader(meterfile, dialect="excel")
 		backup = meters.copy()	# Back this up incase this load doesn't work
 		meters.clear()	# Clear any existing data ready for new
@@ -42,13 +49,13 @@ def LoadSettings():
 				else:
 					raise ValueError
 				meters.update({item.pop('ID').lower(): item})	# Key to the dictionary is the ID itself
-		except ValueError, err:
-			print "The config file had incorrect data in it: {}\nOffending line: {}".format(err,item)
+		except ValueError as err:
+			print("The config file had incorrect data in it: {}\nOffending line: {}".format(err,item))
 			meters = backup.copy()	# Put the backup data back
 			del(backup)
 
 def GoModbus(id):
-	'''Checks to see if the requested meter's data is in cache and still valid and if not, goes and retrieves it and decodes it'''
+	'''Check to see if the requested meter's data is in cache and still valid and if not, retrieve it, decode it and return a dictionary'''
 	global meters	# Ensures the dictionary is accessible
 	if ((datetime.utcnow() - meters[id]['Timestamp']) > timedelta(0,0,0,config.getint('DEFAULT','minpolltime')) and meters[id]['ThreadLock'].acquire(False)):
 		try:	# If the cached data is stale, and there is no Thread retreiving new data (holding the lock), try and get new data
@@ -59,12 +66,12 @@ def GoModbus(id):
 			meters[id].update({'Timestamp':datetime.utcnow()})	# Grabs the time of this fresh data
 			status = 'Polled'
 
-		except ModbusError, e:	# Catch Modbus Specific Exceptions, likely invalid registers etc. Returns the potentially stale cached data
-			print "Modbus error ", e.get_exception_code()
+		except ModbusError as e:	# Catch Modbus Specific Exceptions, likely invalid registers etc. Returns the potentially stale cached data
+			print("Modbus error ", e.get_exception_code())
 			status = 'Modbus Error {}'.format(e.get_exception_code())
 
-		except Exception, e2:	# Catch all other Exceptions, likely socket timeouts or wrong encoding specified etc. Returns the potentially stale cached data
-			print "Error ", str(e2)
+		except Exception as e2:	# Catch all other Exceptions, likely socket timeouts or wrong encoding specified etc. Returns the potentially stale cached data
+			print("Error ", str(e2))
 			status = 'Error {}'.format(str(e2))
 
 		finally:
@@ -75,7 +82,7 @@ def GoModbus(id):
 
 	return {'Name':meters[id]['Name'], 'Value':meters[id]['Value'], 'Timestamp':meters[id]['Timestamp'].isoformat(), 'Units':meters[id]['Units'], 'Status':status}
 
-		
+
 class CustomHandler(SimpleHTTPRequestHandler):	# Based on Python Standard Library
 	def do_GET(self):	# Handles HTTP GET Verb
 		UrlSplit = urlsplit(self.path.lower())	# Drop it all to lower case and splits the URL and Query parts.
@@ -89,39 +96,39 @@ class CustomHandler(SimpleHTTPRequestHandler):	# Based on Python Standard Librar
 			self.send_header('Content-Type','application/json')
 			self.end_headers()	# CORS compatible headers given
 			Data = {id:GoModbus(id) for id in QuerySplit['id']}	# Iterates over all the IDs requested
-			self.wfile.write(dumps(Data))	# Returns the data as JSON format
+			self.wfile.write(dumps(Data).encode())	# Returns the data as JSON format
 			return
 		elif UrlSplit.path == "/command" and UrlSplit.query == 'reload':	# /command?reload specifically
 			self.send_response(202)	# Accepted
 			self.send_header('Content-Type','text/html')
 			self.end_headers()
-			self.wfile.write("Reloading Meter List...\n")
-			print "Reloading Meter List..."		
+			self.wfile.write(b"Reloading Meter List...\n")
+			print("Reloading Meter List...")
 			LoadSettings()	# Tries to reload
-			self.wfile.write("Done")	# It will currently say Done whether it was successful or not
-			print "Done"
+			self.wfile.write(b"Done")	# It will currently say Done whether it was successful or not
+			print("Done")
 			return
 		elif UrlSplit.path == "/command" and UrlSplit.query == 'listmeters':	# /command?listmeters specifically
 			self.send_response(200)
 			self.send_header('Content-Type','application/json')
 			self.end_headers()
-			self.wfile.write(dumps(meters.keys()))	# JSON format of the valid IDs
+			self.wfile.write(dumps(list(meters.keys())).encode())	# JSON format of the valid IDs
 			return
 		elif UrlSplit.path == "/command" and UrlSplit.query == 'status':	# /command?status specifically
 			self.send_response(200)
 			self.send_header('Content-Type','application/json')
 			self.end_headers()
-			self.wfile.write(dumps({'pid':getpid(),'starttime':starttime.isoformat(),'utcnow':datetime.utcnow().isoformat()}))	# Give local Process ID and Working Directory where files are served from
+			self.wfile.write(dumps({'pid':getpid(),'starttime':starttime.isoformat(),'utcnow':datetime.utcnow().isoformat()}).encode())	# Give local Process ID and Working Directory where files are served from
 			return
 		elif UrlSplit.path == "/command" and UrlSplit.query == config.get('DEFAULT','shutdowncmd'):	# shutdown string is defined in the config file and can be obscure
 			self.send_response(202)	# Accepted
 			self.send_header('Content-Type','text/html')
 			self.end_headers()
-			self.wfile.write("Shutting Down...\n")
-			print "Shutting down..."	
+			self.wfile.write(b"Shutting Down...\n")
+			print("Shutting down...")
 			httpd.shutdown()
-			self.wfile.write("Done")	# Hasn't technically shutdown yet but the serving thread should be terminating imminently
-			print "Done"
+			self.wfile.write(b"Done")	# Hasn't technically shutdown yet but the serving thread should be terminating imminently
+			print("Done")
 			return
 		elif config.getboolean('DEFAULT','servefiles'):	# If serving files is allowed, then the original Python library does this.
 			SimpleHTTPRequestHandler.do_GET(self)
@@ -152,8 +159,8 @@ class CustomHandler(SimpleHTTPRequestHandler):	# Based on Python Standard Librar
 if __name__ == '__main__':
 	starttime = datetime.utcnow()
 	config = SafeConfigParser({'httpport':'8080', 'httphost':'localhost', 'minpolltime':'1000', 'meterlist':'Meter List.csv', 'shutdowncmd':'shutdown', 'servefiles':'false', 'listdirs':'false'})	# Default configuration
-	with open(dirname(realpath(__file__))+'/config.cfg', 'r+b') as configfile:
-		config.readfp(configfile)
+	with open(dirname(realpath(__file__))+'/config.cfg', 'r+') as configfile:
+		config.read_file(configfile)
 		if not config.has_section('RUNTIME'):
 			config.add_section('RUNTIME')
 		config.set('RUNTIME','starttime',starttime.isoformat())
@@ -164,19 +171,19 @@ if __name__ == '__main__':
 	cwd = getcwd()	# Store the working directory when the script began
 	if config.getboolean('DEFAULT','servefiles'):
 		nwd = config.get('DEFAULT','fileroot')
-		print 'Files and Folders will be visible from root folder: "{}"'.format(nwd)
+		print('Files and Folders will be visible from root folder: "{}"'.format(nwd))
 		chdir(nwd)	# If files are to be served, change the working directory to the document root folder
 	meters=dict()
 	LoadSettings() # Initial load of definition file
 	httpd = ThreadingTCPServer((config.get('DEFAULT','httphost'), config.getint('DEFAULT','httpport')),CustomHandler)	# Start the HTTP Server
-	print 'Server Running "{}:{}"'.format(config.get('DEFAULT','httphost'),config.get('DEFAULT','httpport'))
-	print 'To shut down, visit "/command?{}"'.format(config.get('DEFAULT','shutdowncmd'))
+	print('Server Running "{}:{}"'.format(config.get('DEFAULT','httphost'),config.get('DEFAULT','httpport')))
+	print('To shut down, visit "/command?{}"'.format(config.get('DEFAULT','shutdowncmd')))
 	try:
 		httpd.serve_forever()
 	except KeyboardInterrupt:	# Allow Ctrl+C locally to close it gracefully
-		print "Shutting down..."
+		print("Shutting down...")
 		httpd.shutdown()
-		print "Done"
+		print("Done")
 	httpd.server_close()	# Finally close everything off
 	chdir(cwd)	# Change the working directory back to what it was when it started.
 	raise SystemExit	# Ensure explicit termination at this point
