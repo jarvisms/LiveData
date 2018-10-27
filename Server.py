@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 '''Live Data Web API for Modbus Meters
-
+26 July 2018 - Version 1.3
+	Implemented regular automatic polling for pulse meters and intial timestamping
 13 June 2018 - Version 1.2
 	Provides previous data for use with cumulative parameters
 13 May 2018 - Version 1.1
@@ -12,10 +13,11 @@
 import modbus_tk.modbus_tcp as modbus_tcp
 from socketserver import ThreadingTCPServer
 from http.server import SimpleHTTPRequestHandler
-from threading import Lock
+from threading import Lock, Event, Thread
 from modbus_tk.modbus import ModbusError
 from csv import DictReader
-from struct import *
+from time import sleep
+from struct import pack, unpack, error
 from datetime import datetime, timedelta
 from json import dumps
 from urllib.parse import urlsplit, parse_qs
@@ -53,6 +55,13 @@ def LoadSettings():
 					item.update({'BigEndian':False})
 				else:
 					raise ValueError
+				AutoUpdate = item.get('AutoUpdate','False').lower()
+				if AutoUpdate in ['true','1','yes']:	# These signify AutoUpdate is required
+					item.update({'AutoUpdate':True})
+				elif AutoUpdate in ['false','0','no', '']:	# These, including blank signify AutoUpdate is not required
+					item.update({'AutoUpdate':False})
+				else:
+					raise ValueError
 				meters.update({item.pop('ID').lower(): item})	# Key to the dictionary is the ID itself
 		except ValueError as err:
 			print("The config file had incorrect data in it: {}\nOffending line: {}".format(err,item))
@@ -71,27 +80,26 @@ def GoModbus(id):
 			if val != meters[id]['Value']:	# Proceed only if the new value is different to the old (Cumulative count values must change)
 				meters[id].update({'PrevValue' : meters[id]['Value'], 'PrevChangeTime' : meters[id]['ChangeTime'] , 'Value' : val, 'Timestamp':datetime.utcnow(), 'ChangeTime': datetime.utcnow() })	# Stores original data as previous, and stores fresh data along with the timestamp of this fresh data, the LastChange records when the change was seen
 				status = 'Polled'
+				if meters[id]['PrevChangeTime'] == datetime.min and meters[id]['PrevValue'] == 0:
+					meters[id]['PrevValue'] = meters[id]['Value']	# This looks like a repeat of above but the Value has since been updated
 			else:	# If the cumulative values have not moved (or by chance, instantaneous values are the same)
-				meters[id].update({'Timestamp':datetime.utcnow()})	# Just store the timestamp as the value is unchanged as is LastChange. Preserve the previous details
+				meters[id]['Timestamp']=datetime.utcnow()	# Just store the timestamp as the value is unchanged as is LastChange. Preserve the previous details
 				status = 'Polled but no recent change'
 		except ModbusError as e:	# Catch Modbus Specific Exceptions, likely invalid registers etc. Returns the potentially stale cached data
 			print("Modbus error ", e.get_exception_code())
 			status = 'Modbus Error {}'.format(e.get_exception_code())
-
 		except Exception as e2:	# Catch all other Exceptions, likely socket timeouts or wrong encoding specified etc. Returns the potentially stale cached data
 			print("Error ", str(e2))
 			status = 'Error {}'.format(str(e2))
-
 		finally:
 			meters[id]['ThreadLock'].release()	# Ensure the lock is released no matter what
-
 	else:	# If the cached data is not stale, then don't do anything and just return that instead
 		status = 'Cached'
-
 	return {'Name':meters[id]['Name'], 'Value':meters[id]['Value'], 'Timestamp':meters[id]['Timestamp'].isoformat(), 'ChangeTime':meters[id]['ChangeTime'].isoformat(), 'PrevValue':meters[id]['PrevValue'], 'PrevChangeTime':meters[id]['PrevChangeTime'].isoformat(), 'Units':meters[id]['Units'], 'Status':status}
 
 
 class CustomHandler(SimpleHTTPRequestHandler):	# Based on Python Standard Library
+	global meters
 	def do_GET(self):	# Handles HTTP GET Verb
 		UrlSplit = urlsplit(self.path.lower())	# Drop it all to lower case and splits the URL and Query parts.
 		QuerySplit = parse_qs(UrlSplit.query)	# Splits apart the parameters and variables into a dictionary
@@ -164,6 +172,13 @@ class CustomHandler(SimpleHTTPRequestHandler):	# Based on Python Standard Librar
 			self.send_error(403) #No permission to list directory
 			return None	# Effectively, all directory listing is blocked
 
+def RegularUpdate(meters, wait, Shutdown):
+	while not Shutdown.is_set():
+		for id in meters:
+			if meters[id]['AutoUpdate']:
+				print(f'Auto-Update meter {meters[id]["Name"]}:{GoModbus(id)["Timestamp"]}')	# Only on meters with AutoUpdate enabled, refresh cached data every so often.
+		sleep(wait)
+
 if __name__ == '__main__':
 	starttime = datetime.utcnow()
 	config = SafeConfigParser({'httpport':'8080', 'httphost':'localhost', 'minpolltime':'1000', 'meterlist':'Meter List.csv', 'shutdowncmd':'shutdown', 'servefiles':'false', 'listdirs':'false'})	# Default configuration
@@ -183,6 +198,9 @@ if __name__ == '__main__':
 		chdir(nwd)	# If files are to be served, change the working directory to the document root folder
 	meters=dict()
 	LoadSettings() # Initial load of definition file
+	Shutdown = Event()	# The flag which will shutdown the auto-updating thread
+	AutoPoll = Thread(target=RegularUpdate, args=(meters, config.getfloat('DEFAULT','autopollsec'), Shutdown), name='AutoPollThread', daemon=True)	# Daemon Thread to auto-update certain items
+	AutoPoll.start()
 	httpd = ThreadingTCPServer((config.get('DEFAULT','httphost'), config.getint('DEFAULT','httpport')),CustomHandler)	# Start the HTTP Server
 	print('Server Running "{}:{}"'.format(config.get('DEFAULT','httphost'),config.get('DEFAULT','httpport')))
 	print('To shut down, visit "/command?{}"'.format(config.get('DEFAULT','shutdowncmd')))
@@ -191,6 +209,7 @@ if __name__ == '__main__':
 	except KeyboardInterrupt:	# Allow Ctrl+C locally to close it gracefully
 		print("Shutting down...")
 		httpd.shutdown()
+		Shutdown.set()
 		print("Done")
 	httpd.server_close()	# Finally close everything off
 	chdir(cwd)	# Change the working directory back to what it was when it started.
