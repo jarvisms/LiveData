@@ -71,12 +71,12 @@ def LoadSettings():
 			meters = backup.copy()	# Put the backup data back
 			del(backup)
 
-def GoModbus(id):
+def GoModbus(id,timeout=1):
 	'''Check to see if the requested meter's data is in cache and still valid and if not, retrieve it, decode it and return a dictionary'''
 	global meters	# Ensures the dictionary is accessible
 	if ((datetime.utcnow() - meters[id]['Timestamp']) > timedelta(0,0,0,config.getint('DEFAULT','minpolltime')) and meters[id]['ThreadLock'].acquire(False)):
 		try:	# If the cached data is stale, and there is no Thread retreiving new data (holding the lock), try and get new data
-			master = modbus_tcp.TcpMaster(host=meters[id].get('IP','127.0.0.1'), port=meters[id].get('Port',502))	# Sets up a TCP connection to the given slave
+			master = modbus_tcp.TcpMaster(host=meters[id].get('IP','127.0.0.1'), port=meters[id].get('Port',502), timeout_in_sec=timeout)	# Sets up a TCP connection to the given slave
 			result = master.execute(meters[id].get('Address',0), meters[id].get('Function',0), meters[id].get('Register',0), meters[id].get('Count',0)) # Polls for the data
 			master._do_close()	# Closes the connection again
 			val = meters[id]['Scale'] * unpack('>'+meters[id].get('Encoding','>'+'H'*len(result)), pack('>'+'H'*len(result), *(result if meters[id]['BigEndian'] else reversed(result))))[0]	# Orders the raw 16 bit words depending on Endianness, and re-encodes them in the given data format
@@ -113,7 +113,7 @@ class CustomHandler(SimpleHTTPRequestHandler):	# Based on Python Standard Librar
 			self.send_header("Access-Control-Allow-Headers", "Content-Type")
 			self.send_header('Content-Type','application/json')
 			self.end_headers()	# CORS compatible headers given
-			Data = {id:GoModbus(id) for id in QuerySplit['id']}	# Iterates over all the IDs requested
+			Data = {id:GoModbus(id,modbustimeout) for id in QuerySplit['id']}	# Iterates over all the IDs requested
 			self.wfile.write(dumps(Data).encode())	# Returns the data as JSON format
 			return
 		elif UrlSplit.path == "/command" and UrlSplit.query == 'reload':	# /command?reload specifically
@@ -208,6 +208,8 @@ if __name__ == '__main__':
 	AutoPoll = Thread(target=RegularUpdate, args=(meters, config.getfloat('DEFAULT','autopollsec'), Shutdown), name='AutoPollThread', daemon=True)	# Daemon Thread to auto-update certain items
 	AutoPoll.start()
 	httpd = ThreadingTCPServer((config.get('DEFAULT','httphost'), config.getint('DEFAULT','httpport')),CustomHandler)	# Start the HTTP Server
+	httpd.request_queue_size = config.getint('DEFAULT','queuesize',fallback=5)
+	modbustimeout = config.getint('DEFAULT','modbustimeout',fallback=1)
 	print('Server Running "{}:{}"'.format(config.get('DEFAULT','httphost'),config.get('DEFAULT','httpport')))
 	print('To shut down, visit "/command?{}"'.format(config.get('DEFAULT','shutdowncmd')))
 	signal.signal(signal.SIGTERM,Killer)
